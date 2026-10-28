@@ -9,9 +9,12 @@
   <style>
     body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f6f8; margin: 0; padding: 0; }
     .header { background-color: #f39c12; color: white; padding: 15px; text-align: center; font-size: 1.2em; font-weight: bold; }
+    
     .controls-container { max-width: 1200px; margin: 20px auto; padding: 0 15px; display: flex; gap: 10px; }
     #location-filter { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 1em; outline: none; }
-    .btn-add { background-color: #2980b9; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+    .btn-add { background-color: #2980b9; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; white-space: nowrap; }
+    .btn-ai { background-color: #8e44ad; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; white-space: nowrap; }
+    
     #ticket-container { max-width: 1200px; margin: 0 auto; padding: 0 15px 30px 15px; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
     
     .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); display: flex; flex-direction: column; }
@@ -38,6 +41,11 @@
     .modal-btn-group { display: flex; gap: 10px; margin-top: 10px; }
     .btn-submit { flex: 1; background: #27ae60; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
     .btn-cancel { flex: 1; background: #95a5a6; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+
+    /* AI 載入動畫專屬樣式 */
+    .ai-loading-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; justify-content: center; align-items: center; flex-direction: column; color: white; font-size: 1.2em; font-weight: bold; }
+    .spinner { border: 6px solid rgba(255,255,255,0.3); border-top: 6px solid #8e44ad; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin-bottom: 15px; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -48,16 +56,21 @@
     <select id="location-filter" onchange="filterTickets()">
       <option value="all">顯示全部地點</option>
     </select>
-    <button class="btn-add" onclick="openModal()">+ 新增</button>
+    
+    <!-- 隱藏的上傳元件與觸發按鈕 -->
+    <input type="file" id="ai-upload" accept="image/*" style="display: none;" onchange="processAIImage(event)">
+    <button class="btn-ai" onclick="document.getElementById('ai-upload').click()">📸 AI 辨識</button>
+    <button class="btn-add" onclick="openModal()">+ 手動</button>
   </div>
 
   <div id="ticket-container">
     <p id="loading-text" style="text-align: center; color: #666; grid-column: 1 / -1;">正在同步最新資料中...</p>
   </div>
 
+  <!-- 新增票券視窗 -->
   <div id="addModal" class="modal-overlay">
     <div class="modal">
-      <h3>➕ 新增票券</h3>
+      <h3 id="modal-title">➕ 新增票券</h3>
       <input type="text" id="input-brand" placeholder="品牌 (例：萊爾富)">
       <input type="text" id="input-item" placeholder="兌換品項 (例：統一布丁)">
       <input type="text" id="input-barcode" placeholder="多條碼請用逗號分隔">
@@ -69,8 +82,14 @@
     </div>
   </div>
 
+  <!-- AI 讀取中的全螢幕覆蓋層 -->
+  <div id="ai-loading" class="ai-loading-overlay">
+    <div class="spinner"></div>
+    <div>AI 正在努力看懂票券...</div>
+    <div style="font-size: 0.8em; margin-top: 10px; color: #ccc;">(通常需要 5~10 秒，請稍候)</div>
+  </div>
+
   <script>
-    // ⚠️【請替換為你最新部署的 GAS 網址】
     const GAS_URL = 'https://script.google.com/macros/s/AKfycbzxGehuREJblWe8VY-JgGgN5mNhGG1GnXp2Y3-2rXuS0TvSDMJLvVm4mTef9o_J__Ix/exec';
     let allTicketsData = [];
 
@@ -84,7 +103,7 @@
       }
 
       try {
-        const res = await fetch(GAS_URL);
+        const res = await fetch(GAS_URL + "?t=" + new Date().getTime());
         const freshData = await res.json();
         
         if (JSON.stringify(freshData) !== JSON.stringify(allTicketsData)) {
@@ -144,7 +163,6 @@
           ? `<div class="expire expire-soon">⚠️ 剩餘 ${diffDays} 天！到期日：${ticket.expireDate}</div>`
           : `<div class="expire">📅 到期日：${ticket.expireDate}</div>`;
 
-        // 加入 barcodes-container 來存放多個一維條碼
         card.innerHTML = `
           <div class="card-header">
             <h3 class="ticket-title">${ticket.item}</h3>
@@ -165,7 +183,6 @@
       });
     }
 
-    // 處理多條碼切割與渲染
     function toggleBarcode(rowNum, barcodeValue) {
       const box = document.getElementById(`code-box-${rowNum}`);
       if (box.classList.contains('show')) {
@@ -174,15 +191,12 @@
         box.classList.add('show');
         if (!box.dataset.rendered) {
           
-          // 利用逗號將字串拆分成陣列
           const codes = String(barcodeValue).split(',');
           
-          // QR Code 預設只讀取第一個條碼生成
           new QRCode(document.getElementById(`qr-${rowNum}`), { 
             text: codes[0].trim(), width: 130, height: 130 
           });
           
-          // 動態產生對應數量的一維條碼
           const barcodeContainer = document.getElementById(`barcodes-${rowNum}`);
           codes.forEach((code, index) => {
             const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -216,7 +230,11 @@
       });
     }
 
-    function openModal() { document.getElementById('addModal').style.display = 'flex'; }
+    function openModal() { 
+      document.getElementById('modal-title').innerText = '➕ 新增票券';
+      document.getElementById('addModal').style.display = 'flex'; 
+    }
+    
     function closeModal() { 
       document.getElementById('addModal').style.display = 'none'; 
       document.getElementById('input-brand').value = '';
@@ -225,49 +243,21 @@
       document.getElementById('input-expire').value = '';
     }
 
-    async function submitTicket() {
-      const brand = document.getElementById('input-brand').value.trim();
-      const item = document.getElementById('input-item').value.trim();
-      const barcode = document.getElementById('input-barcode').value.trim();
-      const expireDate = document.getElementById('input-expire').value;
+    // 🌟 AI 圖片處理核心邏輯
+    async function processAIImage(event) {
+      const file = event.target.files[0];
+      if (!file) return;
 
-      if(!brand || !item || !barcode || !expireDate) {
-        alert('請將所有欄位填寫完整！');
-        return;
-      }
+      document.getElementById('ai-loading').style.display = 'flex';
+      const reader = new FileReader();
+      
+      reader.onload = async function(e) {
+        const base64Image = e.target.result;
 
-      const submitBtn = document.getElementById('btn-submit');
-      submitBtn.disabled = true;
-      submitBtn.innerText = '寫入中...';
-
-      const payload = {
-        action: 'add',
-        brand: brand,
-        item: item,
-        barcode: barcode,
-        expireDate: expireDate.replace(/-/g, '/'),
-        type: '1D'
-      };
-
-      try {
-        await fetch(GAS_URL, {
-          method: 'POST',
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify(payload)
-        });
-        
-        alert('新增成功！');
-        closeModal();
-        fetchTickets();
-      } catch (e) {
-        alert('新增失敗，請檢查網路連線。');
-      } finally {
-        submitBtn.disabled = false;
-        submitBtn.innerText = '確認新增';
-      }
-    }
-
-    fetchTickets();
-  </script>
-</body>
-</html>
+        try {
+          const res = await fetch(GAS_URL, {
+            method: 'POST',
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify({
+              action: 'recognize',
+              image
