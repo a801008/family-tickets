@@ -6,6 +6,8 @@
   <title>電子票券管理</title>
   <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <!-- 引入 Tesseract.js 離線文字辨識引擎 -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <style>
     body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f6f8; margin: 0; padding: 0; }
     .header { background-color: #f39c12; color: white; padding: 15px; text-align: center; font-size: 1.2em; font-weight: bold; }
@@ -42,8 +44,8 @@
     .btn-submit { flex: 1; background: #27ae60; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
     .btn-cancel { flex: 1; background: #95a5a6; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; }
 
-    .ai-loading-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; justify-content: center; align-items: center; flex-direction: column; color: white; font-size: 1.2em; font-weight: bold; }
-    .spinner { border: 6px solid rgba(255,255,255,0.3); border-top: 6px solid #8e44ad; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin-bottom: 15px; }
+    .ai-loading-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; justify-content: center; align-items: center; flex-direction: column; color: white; font-size: 1.2em; font-weight: bold; text-align: center; padding: 20px;}
+    .spinner { border: 6px solid rgba(255,255,255,0.3); border-top: 6px solid #2ecc71; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin-bottom: 15px; }
     @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
   </style>
 </head>
@@ -56,8 +58,8 @@
       <option value="all">顯示全部地點</option>
     </select>
     
-    <input type="file" id="ai-upload" accept="image/*" style="display: none;" onchange="processAIImage(event)">
-    <button class="btn-ai" onclick="document.getElementById('ai-upload').click()">📸 AI 辨識</button>
+    <input type="file" id="ai-upload" accept="image/*" style="display: none;" onchange="processLocalOCR(event)">
+    <button class="btn-ai" onclick="document.getElementById('ai-upload').click()">📸 自動辨識</button>
     <button class="btn-add" onclick="openModal()">+ 手動</button>
   </div>
 
@@ -81,52 +83,40 @@
 
   <div id="ai-loading" class="ai-loading-overlay">
     <div class="spinner"></div>
-    <div>AI 正在努力看懂票券...</div>
-    <div style="font-size: 0.8em; margin-top: 10px; color: #ccc;">(通常需要 5~10 秒，請稍候)</div>
+    <div id="ocr-status">正在啟動離線解析引擎...</div>
+    <div style="font-size: 0.8em; margin-top: 10px; color: #ccc;">(利用本地運算，免連 Google API<br>首次使用需下載模組，約需 5~10 秒)</div>
   </div>
 
   <script>
     const GAS_URL = 'https://script.google.com/macros/s/AKfycbzxGehuREJblWe8VY-JgGgN5mNhGG1GnXp2Y3-2rXuS0TvSDMJLvVm4mTef9o_J__Ix/exec';
     let allTicketsData = [];
 
+    // --- 載入與顯示票券區塊 (保持不變) ---
     async function fetchTickets() {
       try {
         const cachedData = localStorage.getItem('familyTicketsData');
         if (cachedData) {
-          try {
-            const parsedData = JSON.parse(cachedData);
-            if (Array.isArray(parsedData) && parsedData.length > 0) {
-              allTicketsData = parsedData;
-              setupFilter(allTicketsData);
-              renderTickets(allTicketsData);
-              const loader = document.getElementById('loading-text');
-              if(loader) loader.remove();
-            }
-          } catch(e) {
-            localStorage.removeItem('familyTicketsData');
-          }
+          allTicketsData = JSON.parse(cachedData);
+          setupFilter(allTicketsData);
+          renderTickets(allTicketsData);
+          document.getElementById('loading-text') && document.getElementById('loading-text').remove();
         }
 
         const res = await fetch(GAS_URL + "?t=" + new Date().getTime());
-        if (!res.ok) throw new Error('後端無回應');
-        
-        // 如果 GAS 當機回傳錯誤網頁，這行會拋出錯誤並跳轉到 catch
         const freshData = await res.json();
         
-        const loader = document.getElementById('loading-text');
-        if(loader) loader.remove();
+        document.getElementById('loading-text') && document.getElementById('loading-text').remove();
         
         if (JSON.stringify(freshData) !== JSON.stringify(allTicketsData)) {
           allTicketsData = freshData;
           localStorage.setItem('familyTicketsData', JSON.stringify(freshData));
           setupFilter(allTicketsData);
           renderTickets(allTicketsData);
-        } else if (freshData.length === 0) {
-          renderTickets(allTicketsData);
         }
       } catch (error) {
-        // 新增防呆：明確顯示出錯原因
-        document.getElementById('ticket-container').innerHTML = '<p style="text-align:center; color:red; grid-column: 1/-1;">讀取失敗：後端 GAS 程式發生錯誤。<br>請檢查 API Key 兩側是否有加單引號，並確認有重新發佈為「新版本」。</p>';
+        if(!allTicketsData.length) {
+           document.getElementById('ticket-container').innerHTML = '<p style="text-align:center; color:red; grid-column: 1/-1;">讀取失敗，請檢查網路狀態。</p>';
+        }
       }
     }
 
@@ -135,7 +125,6 @@
       const currentSelection = filterSelect.value;
       filterSelect.innerHTML = '<option value="all">顯示全部地點</option>';
       const brands = [...new Set(tickets.map(t => t.brand))].filter(b => b);
-      
       brands.forEach(brand => {
         const option = document.createElement('option');
         option.value = brand;
@@ -201,24 +190,15 @@
       } else {
         box.classList.add('show');
         if (!box.dataset.rendered) {
-          
           const codes = String(barcodeValue).split(',');
-          
-          new QRCode(document.getElementById(`qr-${rowNum}`), { 
-            text: codes[0].trim(), width: 130, height: 130 
-          });
-          
+          new QRCode(document.getElementById(`qr-${rowNum}`), { text: codes[0].trim(), width: 130, height: 130 });
           const barcodeContainer = document.getElementById(`barcodes-${rowNum}`);
           codes.forEach((code, index) => {
             const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
             svg.id = `svg-${rowNum}-${index}`;
             barcodeContainer.appendChild(svg);
-            
-            JsBarcode(`#svg-${rowNum}-${index}`, code.trim(), { 
-              format: "CODE128", width: 2, height: 60, displayValue: true, fontSize: 16 
-            });
+            JsBarcode(`#svg-${rowNum}-${index}`, code.trim(), { format: "CODE128", width: 2, height: 60, displayValue: true, fontSize: 16 });
           });
-
           box.dataset.rendered = "true";
         }
       }
@@ -254,49 +234,70 @@
       document.getElementById('input-expire').value = '';
     }
 
-    async function processAIImage(event) {
+    // 🚀 關鍵破解：捨棄 Google，改用本地端 Tesseract.js 離線解析
+    async function processLocalOCR(event) {
       const file = event.target.files[0];
       if (!file) return;
 
-      document.getElementById('ai-loading').style.display = 'flex';
-      const reader = new FileReader();
-      
-      reader.onload = async function(e) {
-        const base64Image = e.target.result;
+      const loadingDiv = document.getElementById('ai-loading');
+      const statusText = document.getElementById('ocr-status');
+      loadingDiv.style.display = 'flex';
+      statusText.innerText = '正在掃描圖片文字中...';
 
-        try {
-          const res = await fetch(GAS_URL, {
-            method: 'POST',
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: JSON.stringify({
-              action: 'recognize',
-              image: base64Image,
-              mimeType: file.type
-            })
-          });
+      try {
+        // 呼叫瀏覽器內建的文字辨識
+        const result = await Tesseract.recognize(file, 'chi_tra+eng', {
+          logger: m => { if(m.status === 'recognizing text') statusText.innerText = `解析進度: ${Math.round(m.progress * 100)}%`; }
+        });
+        
+        const text = result.data.text;
+        console.log("離線辨識結果：", text);
 
-          const json = await res.json();
-          
-          if (json.status === 'success' && json.data) {
-            document.getElementById('input-brand').value = json.data.brand || '';
-            document.getElementById('input-item').value = json.data.item || '';
-            document.getElementById('input-barcode').value = json.data.barcode || '';
-            document.getElementById('input-expire').value = json.data.expireDate || '';
-            
-            document.getElementById('modal-title').innerText = '✨ AI 辨識完成，請確認';
-            document.getElementById('addModal').style.display = 'flex'; 
-          } else {
-            alert('AI 辨識發生問題：\n' + (json.message || '無法解析圖片，請手動輸入。'));
-          }
-        } catch (error) {
-          alert('上傳發生錯誤，請檢查網路連線或後端狀態。');
-        } finally {
-          document.getElementById('ai-loading').style.display = 'none';
-          event.target.value = '';
+        // 1. 抓取條碼 (尋找連續 8 位數以上的英數字)
+        const barcodeMatches = text.match(/[A-Za-z0-9]{8,}/g);
+        let barcode = '';
+        if (barcodeMatches) {
+          // 濾掉純英文的誤判，保留包含數字的條碼，並用逗號組合給雙條碼用
+          const validCodes = barcodeMatches.filter(code => /\d/.test(code));
+          barcode = validCodes.join(',');
         }
-      };
-      
-      reader.readAsDataURL(file);
+
+        // 2. 抓取日期 (支援 YYYY-MM-DD 或 YYYY/MM/DD)
+        const dateMatch = text.match(/(20\d{2})[-/年\.]([01]?\d)[-/月\.]([0123]?\d)/);
+        let expireDate = '';
+        if (dateMatch) {
+          const y = dateMatch[1];
+          const m = dateMatch[2].padStart(2, '0');
+          const d = dateMatch[3].padStart(2, '0');
+          expireDate = `${y}-${m}-${d}`;
+        }
+
+        // 3. 抓取品牌
+        const knownBrands = ['麥當勞', '萊爾富', '全家', '星巴克', '摩斯', '21世紀', '肯德基', '7-11'];
+        let brand = '';
+        for (let b of knownBrands) {
+          if (text.includes(b)) {
+            brand = b;
+            break;
+          }
+        }
+
+        // 自動填入表單
+        document.getElementById('input-brand').value = brand;
+        document.getElementById('input-barcode').value = barcode;
+        document.getElementById('input-expire').value = expireDate;
+        // 品項通常排版太花俏容易亂掉，留給使用者手動輸入確認
+        document.getElementById('input-item').value = ""; 
+
+        document.getElementById('modal-title').innerText = '✨ 解析完成，請補齊缺漏資訊';
+        document.getElementById('addModal').style.display = 'flex'; 
+
+      } catch (error) {
+        alert('解析發生錯誤：' + error.message);
+      } finally {
+        loadingDiv.style.display = 'none';
+        event.target.value = ''; // 清除檔案，允許重複上傳
+      }
     }
 
     async function submitTicket() {
